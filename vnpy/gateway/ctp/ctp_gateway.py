@@ -474,7 +474,7 @@ class CtpTdApi(TdApi):
         """"""
         if not data:
             return
-        
+
         # Get buffered position object
         key = f"{data['InstrumentID'], data['PosiDirection']}"
         position = self.positions.get(key, None)
@@ -486,12 +486,7 @@ class CtpTdApi(TdApi):
                 gateway_name=self.gateway_name
             )
             self.positions[key] = position
-        
-        # Get contract size, return if size value not collected
-        size = symbol_size_map.get(position.symbol, None)
-        if not size:
-            return
-        
+
         # For SHFE position data update
         if position.exchange == Exchange.SHFE:
             if data["YdPosition"] and not data["TodayPosition"]:
@@ -499,25 +494,30 @@ class CtpTdApi(TdApi):
         # For other exchange position data update
         else:
             position.yd_volume = data["Position"] - data["TodayPosition"]
-        
-        # Calculate previous position cost
-        cost = position.price * position.volume * size
-        
+
         # Update new position volume
         position.volume += data["Position"]
         position.pnl += data["PositionProfit"]
-        
-        # Calculate average position price
-        if position.volume:
-            cost += data["PositionCost"]
-            position.price = cost / (position.volume * size)
-        
+
         # Get frozen volume
         if position.direction == Direction.LONG:
             position.frozen += data["ShortFrozen"]
         else:
             position.frozen += data["LongFrozen"]
-        
+
+        # Get contract size, return if size value not collected
+        size = symbol_size_map.get(position.symbol, None)
+        if not size:
+            pass
+        else:
+            # Calculate previous position cost
+            cost = position.price * position.volume * size
+
+            # Calculate average position price
+            if position.volume:
+                cost += data["PositionCost"]
+                position.price = cost / (position.volume * size)
+
         if last:
             for position in self.positions.values():
                 self.gateway.on_position(position)
@@ -552,13 +552,18 @@ class CtpTdApi(TdApi):
                 gateway_name=self.gateway_name
             )
             
-            # For option only
-            if data["OptionsType"]:
-                contract.option_underlying = data["UnderlyingInstrID"],
-                contract.option_type = OPTIONTYPE_CTP2VT.get(data["OptionsType"], None),
-                contract.option_strike = data["StrikePrice"],
-                contract.option_expiry = datetime.strptime(data["ExpireDate"], "%Y%m%d"),
-            
+            # # For option only
+            # if data["OptionsType"]:
+            #     contract.option_underlying = data["UnderlyingInstrID"],
+            #     contract.option_type = OPTIONTYPE_CTP2VT.get(data["OptionsType"], None),
+            #     contract.option_strike = data["StrikePrice"],
+            #     contract.option_expiry = datetime.strptime(data["ExpireDate"], "%Y%m%d"),
+
+            contract.option_underlying = data["UnderlyingInstrID"]
+            contract.option_type = OPTIONTYPE_CTP2VT.get(data["OptionsType"], None)
+            contract.option_strike = data["StrikePrice"]
+            contract.option_expiry = data["ExpireDate"]
+
             self.gateway.on_contract(contract)
             
             symbol_exchange_map[contract.symbol] = contract.exchange
@@ -773,7 +778,7 @@ class CtpTdApi(TdApi):
         
         self.reqid += 1 
         self.reqQryInvestorPosition(req, self.reqid)
-    
+
     def close(self):
         """"""
         if self.connect_status:
