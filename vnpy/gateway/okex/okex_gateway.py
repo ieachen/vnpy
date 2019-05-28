@@ -74,9 +74,11 @@ class OkexGateway(BaseGateway):
         "Secret Key": "",
         "Passphrase": "",
         "会话数": 3,
-        "代理地址": "127.0.0.1",
-        "代理端口": 1080,
+        "代理地址": "",
+        "代理端口": "",
     }
+
+    exchanges = [Exchange.OKEX]
 
     def __init__(self, event_engine):
         """Constructor"""
@@ -84,6 +86,8 @@ class OkexGateway(BaseGateway):
 
         self.rest_api = OkexRestApi(self)
         self.ws_api = OkexWebsocketApi(self)
+
+        self.orders = {}
 
     def connect(self, setting: dict):
         """"""
@@ -94,9 +98,13 @@ class OkexGateway(BaseGateway):
         proxy_host = setting["代理地址"]
         proxy_port = setting["代理端口"]
 
+        if proxy_port.isdigit():
+            proxy_port = int(proxy_port)
+        else:
+            proxy_port = 0
+
         self.rest_api.connect(key, secret, passphrase,
                               session_number, proxy_host, proxy_port)
-
         self.ws_api.connect(key, secret, passphrase, proxy_host, proxy_port)
 
     def subscribe(self, req: SubscribeRequest):
@@ -123,6 +131,15 @@ class OkexGateway(BaseGateway):
         """"""
         self.rest_api.stop()
         self.ws_api.stop()
+
+    def on_order(self, order: OrderData):
+        """"""
+        self.orders[order.orderid] = order
+        super().on_order(order)
+
+    def get_order(self, orderid: str):
+        """"""
+        return self.orders.get(orderid, None)
 
 
 class OkexRestApi(RestClient):
@@ -254,6 +271,8 @@ class OkexRestApi(RestClient):
             callback=self.on_cancel_order,
             data=data,
             on_error=self.on_cancel_order_error,
+            on_failed=self.on_cancel_order_failed,
+            extra=req
         )
 
     def query_contract(self):
@@ -298,7 +317,8 @@ class OkexRestApi(RestClient):
                 name=symbol,
                 product=Product.SPOT,
                 size=1,
-                pricetick=instrument_data["tick_size"],
+                pricetick=float(instrument_data["tick_size"]),
+                min_volume=float(instrument_data["min_size"]),
                 gateway_name=self.gateway_name
             )
             self.gateway.on_contract(contract)
@@ -336,6 +356,7 @@ class OkexRestApi(RestClient):
                 direction=DIRECTION_OKEX2VT[order_data["side"]],
                 price=float(order_data["price"]),
                 volume=float(order_data["size"]),
+                traded=float(order_data["filled_size"]),
                 time=order_data["timestamp"][11:19],
                 status=STATUS_OKEX2VT[order_data["status"]],
                 gateway_name=self.gateway_name,
@@ -400,6 +421,14 @@ class OkexRestApi(RestClient):
     def on_cancel_order(self, data, request):
         """Websocket will push a new order status"""
         pass
+
+    def on_cancel_order_failed(self, status_code: int, request: Request):
+        """If cancel failed, mark order status to be rejected."""
+        req = request.extra
+        order = self.gateway.get_order(req.orderid)
+        if order:
+            order.status = Status.REJECTED
+            self.gateway.on_order(order)
 
     def on_failed(self, status_code: int, request: Request):
         """
@@ -605,11 +634,11 @@ class OkexWebsocketApi(WebsocketClient):
         if not tick:
             return
 
-        tick.last_price = d["last"]
-        tick.open = d["open_24h"]
-        tick.high = d["high_24h"]
-        tick.low = d["low_24h"]
-        tick.volume = d["base_volume_24h"]
+        tick.last_price = float(d["last"])
+        tick.open = float(d["open_24h"])
+        tick.high = float(d["high_24h"])
+        tick.low = float(d["low_24h"])
+        tick.volume = float(d["base_volume_24h"])
         tick.datetime = datetime.strptime(
             d["timestamp"], "%Y-%m-%dT%H:%M:%S.%fZ")
         self.gateway.on_tick(copy(tick))
@@ -626,13 +655,13 @@ class OkexWebsocketApi(WebsocketClient):
             asks = d["asks"]
             for n, buf in enumerate(bids):
                 price, volume, _ = buf
-                tick.__setattr__("bid_price_%s" % (n + 1), price)
-                tick.__setattr__("bid_volume_%s" % (n + 1), volume)
+                tick.__setattr__("bid_price_%s" % (n + 1), float(price))
+                tick.__setattr__("bid_volume_%s" % (n + 1), float(volume))
 
             for n, buf in enumerate(asks):
                 price, volume, _ = buf
-                tick.__setattr__("ask_price_%s" % (n + 1), price)
-                tick.__setattr__("ask_volume_%s" % (n + 1), volume)
+                tick.__setattr__("ask_price_%s" % (n + 1), float(price))
+                tick.__setattr__("ask_volume_%s" % (n + 1), float(volume))
 
             tick.datetime = datetime.strptime(
                 d["timestamp"], "%Y-%m-%dT%H:%M:%S.%fZ")
@@ -646,17 +675,17 @@ class OkexWebsocketApi(WebsocketClient):
             type=ORDERTYPE_OKEX2VT[d["type"]],
             orderid=d["client_oid"],
             direction=DIRECTION_OKEX2VT[d["side"]],
-            price=d["price"],
-            volume=d["size"],
-            traded=d["filled_size"],
+            price=float(d["price"]),
+            volume=float(d["size"]),
+            traded=float(d["filled_size"]),
             time=d["timestamp"][11:19],
             status=STATUS_OKEX2VT[d["status"]],
             gateway_name=self.gateway_name,
         )
         self.gateway.on_order(copy(order))
 
-        trade_volume = float(d.get("last_fill_qty", 0))
-        if not trade_volume:
+        trade_volume = d.get("last_fill_qty", 0)
+        if not trade_volume or float(trade_volume) == 0:
             return
 
         self.trade_count += 1
